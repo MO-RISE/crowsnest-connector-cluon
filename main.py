@@ -1,6 +1,7 @@
 """Main entrypoint for this application"""
 import os
 import json
+from typing import List
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +24,12 @@ brefv = import_odvd(THIS_DIR / "brefv" / "morise-brefv.odvd")
 opendlv = import_odvd(THIS_DIR / "opendlv.standard-message-set" / "opendlv.odvd")
 
 CLUON_CID = int(os.environ.get("CLUON_CID", 111))
+CLUON_ENVELOPES_PER_REVOLUTION = int(
+    os.environ.get("CLUON_ENVELOPES_PER_REVOLUTION", 2)
+)
+CLUON_SENSOR_ORIENTATION_X = int(os.environ.get("CLUON_SENSOR_ORIENTATION_X", 0))
+CLUON_SENSOR_ORIENTATION_Y = int(os.environ.get("CLUON_SENSOR_ORIENTATION_Y", 0))
+CLUON_SENSOR_ORIENTATION_Z = int(os.environ.get("CLUON_SENSOR_ORIENTATION_Z", 0))
 
 
 ## MQTT setup
@@ -45,7 +52,7 @@ mq.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT)
 pcd_source: Stream = Stream()
 
 
-def point_cloud_reading_extractor(envelope: Envelope) -> np.ndarray:
+def point_cloud_reading_extractor(envelopes: List[Envelope]) -> np.ndarray:
     """Extract a point cloud in numpy format from an odvd envelope
 
     Args:
@@ -54,28 +61,35 @@ def point_cloud_reading_extractor(envelope: Envelope) -> np.ndarray:
     Returns:
         np.ndarray: The point cloud as a 2D np.ndarray with shape (n, 3)
     """
+    all_azimuths = []
+    all_binary_distances = bytes()
+
     try:
-        msg = opendlv.opendlv_proxy_PointCloudReading()
-        msg.ParseFromString(envelope.serialized_data)
-        start_azimuth = msg.startAzimuth
-        end_azimuth = msg.endAzimuth
-        entries_per_azimuth = msg.entriesPerAzimuth
-        binary_distances = msg.distances
+        for envelope in envelopes:
+            msg = opendlv.opendlv_proxy_PointCloudReading()
+            msg.ParseFromString(envelope.serialized_data)
+            start_azimuth = msg.startAzimuth
+            end_azimuth = msg.endAzimuth
+            entries_per_azimuth = msg.entriesPerAzimuth
+            binary_distances = msg.distances
 
-        # Bail early
-        if not binary_distances:
-            return None
+            # Bail early
+            if not binary_distances:
+                continue
 
-        n_points = lu.get_number_of_points(binary_distances)
-        n_azimuths = lu.get_number_of_azimuths(n_points, entries_per_azimuth)
-        azimuths = np.linspace(
-            start_azimuth, end_azimuth, int(n_azimuths), endpoint=True
-        )
+            n_points = lu.get_number_of_points(binary_distances)
+            n_azimuths = lu.get_number_of_azimuths(n_points, entries_per_azimuth)
+            azimuths = np.linspace(
+                start_azimuth, end_azimuth, int(n_azimuths), endpoint=True
+            )
+
+            all_azimuths.extend(azimuths.tolist())
+            all_binary_distances += binary_distances
 
         points = lu.get_points(
-            np.deg2rad(azimuths),
+            np.deg2rad(all_azimuths),
             np.deg2rad(lu.VERTICAL_ANGLES_16),
-            binary_distances,
+            all_binary_distances,
         )
 
         if not points.size:
@@ -88,7 +102,8 @@ def point_cloud_reading_extractor(envelope: Envelope) -> np.ndarray:
 
 
 pcd_extractor: Stream = (
-    pcd_source.map(point_cloud_reading_extractor)
+    pcd_source.partition(CLUON_ENVELOPES_PER_REVOLUTION)
+    .map(point_cloud_reading_extractor)
     .filter(lambda x: x is not None)
     .latest()
     .rate_limit(0.5)
@@ -154,7 +169,11 @@ def transform_coords(data: tuple):
         tuple: (position, rotated point cloud)
     """
     pos, hdg, points = data
-    orientation = [hdg + 0, 0, 0]
+    orientation = [
+        hdg + CLUON_SENSOR_ORIENTATION_Z,
+        CLUON_SENSOR_ORIENTATION_Y,
+        CLUON_SENSOR_ORIENTATION_X,
+    ]
     transform = Rotation.from_euler("zyx", orientation, degrees=True)
     points = transform.apply(points)
     return pos, points
@@ -180,11 +199,13 @@ def to_mqtt(data):
 processed.sink(to_mqtt)
 
 
-# Trigger sources
-session = OD4Session(CLUON_CID)
-session.add_data_trigger(49, pcd_source.emit)
-session.add_data_trigger(1051, hdg_source.emit)
-session.add_data_trigger(19, pos_source.emit)
+if __name__ == "__main__":
+    print("All setup done, lets start processing messages!")
 
-print("All setup done, lets start processing messages!")
-mq.loop_forever()
+    # Register triggers
+    session = OD4Session(CLUON_CID)
+    session.add_data_trigger(49, pcd_source.emit)
+    session.add_data_trigger(1051, hdg_source.emit)
+    session.add_data_trigger(19, pos_source.emit)
+
+    mq.loop_forever()
