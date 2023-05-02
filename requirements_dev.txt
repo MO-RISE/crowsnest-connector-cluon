@@ -1,2 +1,4 @@
 black
 pylint
+datamodel-code-generator
+-r requirements.txt

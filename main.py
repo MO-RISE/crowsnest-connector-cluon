@@ -3,6 +3,8 @@ import os
 import json
 from typing import List
 from pathlib import Path
+import logging
+import warnings
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -15,35 +17,46 @@ from pycluon import OD4Session, Envelope
 from pycluon.importer import import_odvd
 
 import geojson
-
+from environs import Env
 import lidar_utils as lu
+
+# Reading config from environment variables
+env = Env()
+
+LOG_LEVEL = env.log_level("LOG_LEVEL", logging.DEBUG)
+# Setup logger
+logging.basicConfig(level=LOG_LEVEL)
+logging.captureWarnings(True)
+warnings.filterwarnings("once")
+LOGGER = logging.getLogger("crowsnest-connector-cluon-lidar")
 
 ## Cluon setup
 THIS_DIR = Path(__file__).parent
-brefv = import_odvd(THIS_DIR / "brefv" / "morise-brefv.odvd")
+brefv = import_odvd(THIS_DIR / "brefv-spec" / "morise-brefv.odvd")
 opendlv = import_odvd(THIS_DIR / "opendlv.standard-message-set" / "opendlv.odvd")
 
-CLUON_CID = int(os.environ.get("CLUON_CID", 111))
-CLUON_ENVELOPES_PER_REVOLUTION = int(
-    os.environ.get("CLUON_ENVELOPES_PER_REVOLUTION", 2)
-)
+CLUON_CID = env.int("CLUON_CID", 65)
+CLUON_ENVELOPES_PER_REVOLUTION = int(os.environ.get("CLUON_ENVELOPES_PER_REVOLUTION", 2) )
 CLUON_SENSOR_ORIENTATION_X = int(os.environ.get("CLUON_SENSOR_ORIENTATION_X", 0))
 CLUON_SENSOR_ORIENTATION_Y = int(os.environ.get("CLUON_SENSOR_ORIENTATION_Y", 0))
 CLUON_SENSOR_ORIENTATION_Z = int(os.environ.get("CLUON_SENSOR_ORIENTATION_Z", 0))
 
 
 ## MQTT setup
-MQTT_BROKER_HOST = os.environ.get("MQTT_BROKER_HOST")
-MQTT_BROKER_PORT = int(os.environ.get("MQTT_BROKER_PORT", "1883"))
-MQTT_CLIENT_ID = os.environ.get("MQTT_CLIENT_ID", "")
-MQTT_TRANSPORT = os.environ.get("MQTT_TRANSPORT", "tcp")
-MQTT_USER = os.environ.get("MQTT_USER")
-MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD")
-MQTT_BASE_TOPIC = os.environ.get("MQTT_BASE_TOPIC")
+MQTT_BROKER_HOST = env("MQTT_BROKER_HOST", "localhost")
+MQTT_BROKER_PORT = env.int("MQTT_BROKER_PORT", 1883)
+MQTT_CLIENT_ID = env("MQTT_CLIENT_ID", None)
+MQTT_TRANSPORT = env("MQTT_TRANSPORT", "tcp")
+MQTT_TLS = env.bool("MQTT_TLS", False)
+MQTT_USER = env("MQTT_USER", None)
+MQTT_PASSWORD = env("MQTT_PASSWORD", None)
+MQTT_BASE_TOPIC = env("MQTT_BASE_TOPIC", "CROWSNEST/SEAHORSE/LIDAR")
 
 mq = MQTT(client_id=MQTT_CLIENT_ID, transport=MQTT_TRANSPORT)
 mq.username_pw_set(MQTT_USER, MQTT_PASSWORD)
-mq.tls_set()
+if MQTT_TLS:
+    mq.tls_set()
+
 mq.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT)
 
 
@@ -63,6 +76,8 @@ def point_cloud_reading_extractor(envelopes: List[Envelope]) -> np.ndarray:
     """
     all_azimuths = []
     all_binary_distances = bytes()
+
+    LOGGER.info("Got envelope from pycluon")
 
     try:
         for envelope in envelopes:
@@ -107,6 +122,7 @@ pcd_extractor: Stream = (
     .filter(lambda x: x is not None)
     .latest()
     .rate_limit(0.5)
+    .map(print)
 )
 
 ### Heading handling
@@ -191,7 +207,7 @@ def to_mqtt(data):
     pos, points = data
     origin = geojson.Point(pos)
     mq.publish(
-        f"{MQTT_BASE_TOPIC}/lidar",
+        f"{MQTT_BASE_TOPIC}/0/POINTCLOUD",
         json.dumps({"origin": origin, "points": points.tolist()}),
     )
 
@@ -204,7 +220,7 @@ if __name__ == "__main__":
 
     # Register triggers
     session = OD4Session(CLUON_CID)
-    session.add_data_trigger(49, pcd_source.emit)
+    session.add_data_trigger(1211, pcd_source.emit)
     session.add_data_trigger(1051, hdg_source.emit)
     session.add_data_trigger(19, pos_source.emit)
 

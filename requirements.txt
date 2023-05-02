@@ -3,4 +3,6 @@ scipy
 pycluon
 paho-mqtt
 geojson
+environs
 streamz
+pydantic
