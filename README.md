@@ -1,4 +1,6 @@
-# crowsnest-connector-cluon-lidar
+# crowsnest-connector-cluon-lidar (Velodyne)
+
+<span style="color:red">Not compatible with Ousters lidar´s</span>
 
 A connector to a cluon-based UDP multicast setup for listening in on lidar data, unpack, transform and convey to a mqtt broker.
 
